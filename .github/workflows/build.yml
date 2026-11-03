@@ -1,3 +1,4 @@
+
 name: CICD_Pipeline
 
 on:
@@ -8,55 +9,98 @@ on:
   #     - 'deploy/**'
   #     - '.github/workflows/**'
   workflow_dispatch:
+
 jobs:
   secrets-detection:
-   runs-on: ubuntu-latest
-   name: Secrets Detection
-   continue-on-error: true   # NON-BLOCKING. REAL-APP GATE: remove + drop --soft-fail.​
-
-   steps:
-     - uses: actions/checkout@v6.0.2
-       with: { fetch-depth: 0, ref: '${{ github.ref }}' }
-     - name: Pin Git version
-       run: |
-         sudo apt-get update
-         sudo apt-get install -y --allow-downgrades git/noble-updates git-man/noble-updates
-         sudo apt-mark hold git git-man
-         git --version
-         
-     - uses: actions/setup-python@v6.2.0
-       with:
-         python-version: 3.12
-         pip-install: detect-secrets==1.5.0 checkov==3.3.17 unidiff==0.7.5
-
-     - name: Detect-Secrets
-       run: detect-secrets scan --all-files | tee detect-secrets.json
-     - uses: actions/upload-artifact@v6.0.0
-       with: { name: Secrets-reports, path: detect-secrets.json, retention-days: 1 }
-
-     - name: GitLeaks
-       run: docker run --rm -v $(pwd):/src ghcr.io/gitleaks/gitleaks:latest git -v --exit-code 0 --report-format json --report-path /src/gitleaks.json /src
-     - uses: actions/upload-artifact@v6.0.0
-       with: { name: GitLeaks-reports, path: gitleaks.*, retention-days: 1 }
-
-     - name: Checkov (secrets)
-       run: checkov -d . --framework secrets --output-file-path checkov_secrets_results -o json -o cli --enable-secret-scan-all-files --scan-secrets-history --soft-fail
-     - uses: actions/upload-artifact@v6.0.0
-       with: { name: Checkov Secrets Detection Results, path: checkov_secrets_results/*, retention-days: 1 }
-       
-  sast:
     runs-on: ubuntu-latest
-    name: SAST - Semgrep
-    continue-on-error: true   # NON-BLOCKING. REAL-APP GATE: remove + fail on findings.​
+    name: Secrets Detection
+    continue-on-error: true # NON-BLOCKING. REAL-APP GATE: remove + drop --soft-fail.
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with: { fetch-depth: 0, ref: '${{ github.ref }}' }
+
+      - name: Pin Git version
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades git/noble-updates git-man/noble-updates
+          sudo apt-mark hold git git-man
+          git --version
+
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: 3.12
+          pip-install: detect-secrets==1.5.0 checkov==3.3.17 unidiff==0.7.5
+
+      - name: Detect-Secrets
+        run: detect-secrets scan --all-files | tee detect-secrets.json
+
+      - uses: actions/upload-artifact@v6.0.0
+        with: { name: Secrets-reports, path: detect-secrets.json, retention-days: 1 }
+
+      - name: GitLeaks
+        run: docker run --rm -v $(pwd):/src ghcr.io/gitleaks/gitleaks:latest git -v --exit-code 0 --report-format json --report-path /src/gitleaks.json /src
+
+      - uses: actions/upload-artifact@v6.0.0
+        with: { name: GitLeaks-reports, path: gitleaks.*, retention-days: 1 }
+
+      - name: Checkov (secrets)
+        run: checkov -d . --framework secrets --output-file-path checkov_secrets_results -o json -o cli --enable-secret-scan-all-files --scan-secrets-history --soft-fail
+
+      - uses: actions/upload-artifact@v6.0.0
+        with: { name: Checkov Secrets Detection Results, path: checkov_secrets_results/*, retention-days: 1 }
+        
+  sca:
+    runs-on: ubuntu-latest
+    name: SCA - Trivy
+    continue-on-error: true # NON-BLOCKING. REAL-APP GATE: remove + drop --exit-code 0 override.
     needs: secrets-detection
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          version: v0.74.0
+
+      - name: Trivy DB Update
+        continue-on-error: true
+        run: |
+          trivy fs --download-db-only
+
+      - name: Trivy JAVA DB Update
+        continue-on-error: true
+        run: |
+          trivy fs --download-java-db-only
+
+      - name: Run Trivy SCA
+        continue-on-error: true
+        run: |
+          trivy fs \
+            --scanners vuln,secret,misconfig,license \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output trivy-results.json \
+            --exit-code 0 \
+            .
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: trivy-results, path: trivy-results.json, retention-days: 1, if-no-files-found: warn }
+
+  sast:
+    runs-on: ubuntu-latest
+    name: SAST - Semgrep
+    continue-on-error: true # NON-BLOCKING. REAL-APP GATE: remove + fail on findings.
+    needs: sca
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Run Semgrep
         run: |
           python -m pip install semgrep
-          #semgrep scan --config p/default --json --output semgrep-results.json .
+          # semgrep scan --config p/default --json --output semgrep-results.json .
           semgrep scan --allow-local-builds --text-output=crAPI_SAST_semgrep.text --json-output=crAPI_SAST_semgrep.json --dataflow-traces
-  
+
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: semgrep-results, path: crAPI_SAST_semgrep.*, retention-days: 1, if-no-files-found: warn }
