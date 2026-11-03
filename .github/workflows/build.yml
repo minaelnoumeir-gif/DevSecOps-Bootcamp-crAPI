@@ -47,3 +47,19 @@ jobs:
 
      - uses: actions/upload-artifact@v6.0.0
        with: { name: Checkov Secrets Detection Results, path: checkov_secrets_results/*, retention-days: 1 }
+  sast:
+    runs-on: ubuntu-latest
+    name: SAST - Semgrep
+    continue-on-error: true   # NON-BLOCKING. REAL-APP GATE: remove + fail on findings.​
+  
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Semgrep
+        run: |
+          python -m pip install semgrep
+          #semgrep scan --config p/default --json --output semgrep-results.json .
+          semgrep scan --allow-local-builds --text-output=crAPI_SAST_semgrep.text --json-output=crAPI_SAST_semgrep.json --dataflow-traces
+  
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: semgrep-results, path: crAPI_SAST_semgrep.*, retention-days: 1, if-no-files-found: warn }
