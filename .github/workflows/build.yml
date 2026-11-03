@@ -25,33 +25,30 @@ jobs:
          git --version
          
      - uses: actions/setup-python@v6.2.0
-
        with:
          python-version: 3.12
          pip-install: detect-secrets==1.5.0 checkov==3.3.17 unidiff==0.7.5
 
      - name: Detect-Secrets
        run: detect-secrets scan --all-files | tee detect-secrets.json
-
      - uses: actions/upload-artifact@v6.0.0
        with: { name: Secrets-reports, path: detect-secrets.json, retention-days: 1 }
 
      - name: GitLeaks
        run: docker run --rm -v $(pwd):/src ghcr.io/gitleaks/gitleaks:latest git -v --exit-code 0 --report-format json --report-path /src/gitleaks.json /src
-
      - uses: actions/upload-artifact@v6.0.0
        with: { name: GitLeaks-reports, path: gitleaks.*, retention-days: 1 }
 
      - name: Checkov (secrets)
        run: checkov -d . --framework secrets --output-file-path checkov_secrets_results -o json -o cli --enable-secret-scan-all-files --scan-secrets-history --soft-fail
-
      - uses: actions/upload-artifact@v6.0.0
        with: { name: Checkov Secrets Detection Results, path: checkov_secrets_results/*, retention-days: 1 }
+       
   sast:
     runs-on: ubuntu-latest
     name: SAST - Semgrep
     continue-on-error: true   # NON-BLOCKING. REAL-APP GATE: remove + fail on findings.​
-  
+    needs: secrets-detection
     steps:
       - uses: actions/checkout@v4
       - name: Run Semgrep
