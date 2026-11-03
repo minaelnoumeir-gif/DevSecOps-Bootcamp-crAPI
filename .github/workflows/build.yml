@@ -17,7 +17,9 @@ jobs:
     continue-on-error: true # NON-BLOCKING. REAL-APP GATE: remove + drop --soft-fail.
     steps:
       - uses: actions/checkout@v6.0.2
-        with: { fetch-depth: 0, ref: '${{ github.ref }}' }
+        with:
+          fetch-depth: 0
+          ref: '${{ github.ref }}'
 
       - name: Pin Git version
         run: |
@@ -35,25 +37,56 @@ jobs:
         run: detect-secrets scan --all-files | tee detect-secrets.json
 
       - uses: actions/upload-artifact@v6.0.0
-        with: { name: Secrets-reports, path: detect-secrets.json, retention-days: 1 }
+        with:
+          name: Secrets-reports
+          path: detect-secrets.json
+          retention-days: 1
 
       - name: GitLeaks
         run: docker run --rm -v $(pwd):/src ghcr.io/gitleaks/gitleaks:latest git -v --exit-code 0 --report-format json --report-path /src/gitleaks.json /src
 
       - uses: actions/upload-artifact@v6.0.0
-        with: { name: GitLeaks-reports, path: gitleaks.*, retention-days: 1 }
+        with:
+          name: GitLeaks-reports
+          path: gitleaks.*
+          retention-days: 1
 
       - name: Checkov (secrets)
         run: checkov -d . --framework secrets --output-file-path checkov_secrets_results -o json -o cli --enable-secret-scan-all-files --scan-secrets-history --soft-fail
 
       - uses: actions/upload-artifact@v6.0.0
-        with: { name: Checkov Secrets Detection Results, path: checkov_secrets_results/*, retention-days: 1 }
-        
+        with:
+          name: Checkov Secrets Detection Results
+          path: checkov_secrets_results/*
+          retention-days: 1
+
+  sast:
+    runs-on: ubuntu-latest
+    name: SAST - Semgrep
+    continue-on-error: true # NON-BLOCKING. REAL-APP GATE: remove + fail on findings.
+    needs: secrets-detection
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: |
+          python -m pip install semgrep
+          # semgrep scan --config p/default --json --output semgrep-results.json .
+          semgrep scan --allow-local-builds --text-output=crAPI_SAST_semgrep.text --json-output=crAPI_SAST_semgrep.json --dataflow-traces
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-results
+          path: crAPI_SAST_semgrep.*
+          retention-days: 1
+          if-no-files-found: warn
+
   sca:
     runs-on: ubuntu-latest
     name: SCA - Trivy
     continue-on-error: true # NON-BLOCKING. REAL-APP GATE: remove + drop --exit-code 0 override.
-    needs: secrets-detection
+    needs: sast
     steps:
       - uses: actions/checkout@v4
 
@@ -85,22 +118,86 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: trivy-results, path: trivy-results.json, retention-days: 1, if-no-files-found: warn }
+        with:
+          name: trivy-results
+          path: trivy-results.json
+          retention-days: 1
+          if-no-files-found: warn
 
-  sast:
+  dockerfile-scan:
     runs-on: ubuntu-latest
-    name: SAST - Semgrep
-    continue-on-error: true # NON-BLOCKING. REAL-APP GATE: remove + fail on findings.
-    needs: sca
+    name: Dockerfile Scanning
+    continue-on-error: true # NON-BLOCKING. REAL-APP GATE: remove + drop --soft-fail.
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+          ref: '${{ github.ref }}'
+
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: 3.12
+          pip-install: checkov
+
+      - name: Checkov (dockerfile)
+        run: checkov -d . --framework dockerfile --output-file-path checkov_dockerfile_results -o json -o cli --soft-fail
+
+      - uses: actions/upload-artifact@v6.0.0
+        with:
+          name: Checkov Dockerfile Scanning Results
+          path: checkov_dockerfile_results/*
+          retention-days: 1
+
+  image-scan:
+    runs-on: ubuntu-latest
+    continue-on-error: true # NON-BLOCKING. REAL-APP GATE: remove + Trivy --exit-code 1.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Semgrep
+      - name: Download all built image artifacts (no rebuild)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-*
+          path: /tmp/images
+          merge-multiple: true
+
+      - name: Load all images from tar
         run: |
-          python -m pip install semgrep
-          # semgrep scan --config p/default --json --output semgrep-results.json .
-          semgrep scan --allow-local-builds --text-output=crAPI_SAST_semgrep.text --json-output=crAPI_SAST_semgrep.json --dataflow-traces
+          set -e
+          for f in /tmp/images/*.tar; do
+            docker load -i "$f"
+          done
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          version: v0.74.0
+
+      - name: Run Trivy against every loaded image
+        env:
+          TAG_NAME: ${{ needs.meta.outputs.tag_name }}
+        run: |
+          mkdir -p trivy-reports
+          trivy image --download-db-only
+
+          for image in crapi/crapi-identity crapi/crapi-workshop crapi/crapi-chatbot \
+                       crapi/crapi-community crapi/crapi-web crapi/gateway-service crapi/mailhog; do
+            safe=$(echo "$image" | tr '/:' '__')
+            echo "::group::Trivy $image"
+            trivy image --scanners vuln,secret,misconfig,license \
+              --severity HIGH,CRITICAL --skip-db-update \
+              --format table --output "trivy-reports/${safe}.txt" \
+              --exit-code 0 "$image:${TAG_NAME}"
+            cat "trivy-reports/${safe}.txt"
+            echo "::endgroup::"
+          done
 
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: semgrep-results, path: crAPI_SAST_semgrep.*, retention-days: 1, if-no-files-found: warn }
+        with:
+          name: trivy-image-reports
+          path: trivy-reports/
+          retention-days: 1
+          if-no-files-found: warn
